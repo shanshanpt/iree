@@ -20,6 +20,7 @@ on:
   push:
     branches:
       - master
+      - gcmn-test-submodule-sync
 
 jobs:
   synchronize:

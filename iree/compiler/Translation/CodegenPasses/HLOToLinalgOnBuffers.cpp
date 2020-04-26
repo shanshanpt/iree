@@ -84,6 +84,17 @@ static ArrayAttr getParallelAndReductionIterAttrs(Builder b, unsigned nLoops,
   return b.getArrayAttr(attrs);
 }
 
+/// Emits linalg.fill op to fill the given `buffer` with zero value.
+static LogicalResult zeroFillBuffer(Location loc, Value buffer,
+                                    OpBuilder &builder) {
+  auto zeroAttr =
+      builder.getZeroAttr(buffer.getType().cast<MemRefType>().getElementType());
+  if (!zeroAttr) return failure();
+  auto zeroValue = builder.create<ConstantOp>(loc, zeroAttr);
+  builder.create<linalg::FillOp>(loc, buffer, zeroValue);
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // Linalg tensor and buffer conversion utilities.
 //===----------------------------------------------------------------------===//
@@ -324,9 +335,14 @@ struct DotOpConversion
   LinalgOpTy apply(xla_hlo::DotOp op, ArrayRef<Value> args,
                    ArrayRef<Value> results,
                    ConversionPatternRewriter &rewriter) const {
-    if (getDotOperationType(op) == opType)
+    if (getDotOperationType(op) == opType) {
+      if (failed(zeroFillBuffer(op.getLoc(), results[0], rewriter))) {
+        rewriter.notifyMatchFailure(op, "failed to zero fill result buffer");
+        return nullptr;
+      }
       return rewriter.create<LinalgOpTy>(op.getLoc(), args[0], args[1],
                                          results[0]);
+    }
     return nullptr;
   }
 };
@@ -424,6 +440,10 @@ linalg::ConvOp ConvOpConversion::apply(
     padding = nullptr;
   }
 
+  if (failed(zeroFillBuffer(op.getLoc(), results[0], rewriter))) {
+    rewriter.notifyMatchFailure(op, "failed to zero fill result buffer");
+    return nullptr;
+  }
   return rewriter.create<linalg::ConvOp>(op.getLoc(), args[1], args[0],
                                          results[0], stridesArg, dilationArg,
                                          padding);
@@ -635,6 +655,11 @@ linalg::LinalgOp ReduceWindowOpConversion::apply(
   };
   linalg::LinalgOp poolingOp;
   PoolingType poolingType = getPoolingType(op.body());
+
+  if (failed(zeroFillBuffer(loc, results[0], rewriter))) {
+    rewriter.notifyMatchFailure(op, "failed to zero fill result buffer");
+    return nullptr;
+  }
   switch (poolingType) {
     case PoolingType::kMin: {
       poolingOp = createOp(static_cast<linalg::PoolingMinOp *>(nullptr));
@@ -824,6 +849,11 @@ linalg::IndexedGenericOp ReduceOpConversion::apply(
   SmallVector<Value, 2> linalgOpArgs = {operands[0]};
   if (!initConstVal) linalgOpArgs.push_back(operands[1]);
   linalgOpArgs.push_back(results[0]);
+
+  if (failed(zeroFillBuffer(loc, results[0], rewriter))) {
+    rewriter.notifyMatchFailure(reduceOp, "failed to zero fill result buffer");
+    return nullptr;
+  }
   auto linalgOp = rewriter.create<linalg::IndexedGenericOp>(
       loc, resultTypes, linalgOpArgs,
       rewriter.getI64IntegerAttr(linalgOpArgs.size() - 1),  // args_in

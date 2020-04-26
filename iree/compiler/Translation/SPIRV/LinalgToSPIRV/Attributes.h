@@ -12,30 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef IREE_COMPILER_TRANSLATION_SPIRV_INIT_TRANSLATIONS_H_
-#define IREE_COMPILER_TRANSLATION_SPIRV_INIT_TRANSLATIONS_H_
+#ifndef IREE_COMPILER_TRANSLATION_SPIRV_LINALGTOSPIRV_ATTRIBUTES_H_
+#define IREE_COMPILER_TRANSLATION_SPIRV_LINALGTOSPIRV_ATTRIBUTES_H_
 
-#include "iree/compiler/Translation/SPIRV/LinalgToSPIRV/Passes.h"
-#include "mlir/Pass/Pass.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace mlir {
 namespace iree_compiler {
 
-// This function should be called before creating any MLIRContext if one
-// expects all the possible translations to be made available to the context
-// automatically.
-inline void registerSPRIVTranslation() {
-  static bool init_once = []() {
-    // LinalgToSPIRV
-    createConvertToGPUPass();
-    createLinalgTileAndFusePass();
-    createSplitDispatchFunctionPass();
-    return true;
-  }();
-  (void)init_once;
+/// Attribute on a module op to denote the scheduling order of entry points.
+/// The attribute value is expected to be an array of entry point name strings.
+inline llvm::StringRef getEntryPointScheduleAttrName() {
+  return "vkspv.entry_point_schedule";
 }
 
 }  // namespace iree_compiler
 }  // namespace mlir
 
-#endif  // IREE_COMPILER_TRANSLATION_SPIRV_INIT_TRANSLATIONS_H_
+#endif  // IREE_COMPILER_TRANSLATION_SPIRV_LINALGTOSPIRV_ATTRIBUTES_H_

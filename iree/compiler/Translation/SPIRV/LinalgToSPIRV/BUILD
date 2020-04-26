@@ -24,14 +24,17 @@ cc_library(
         "ConvertToSPIRVPass.cpp",
         "LinalgTileAndFusePass.cpp",
         "LowerToSPIRV.cpp",
+        "SplitDispatchFunctionPass.cpp",
     ],
     hdrs = [
+        "Attributes.h",
         "LowerToSPIRV.h",
         "Passes.h",
     ],
     deps = [
         "//iree/compiler/Dialect/HAL/IR",
         "//iree/compiler/Dialect/IREE/IR",
+        "//iree/compiler/Dialect/Shape/IR",
         "//iree/compiler/Dialect/Shape/Transforms",
         "//iree/compiler/Translation/CodegenPasses",
         "//iree/compiler/Translation/CodegenUtils",

@@ -18,6 +18,7 @@ iree_cc_library(
   NAME
     LinalgToSPIRV
   HDRS
+    "Attributes.h"
     "LowerToSPIRV.h"
     "Passes.h"
   SRCS
@@ -25,6 +26,7 @@ iree_cc_library(
     "ConvertToSPIRVPass.cpp"
     "LinalgTileAndFusePass.cpp"
     "LowerToSPIRV.cpp"
+    "SplitDispatchFunctionPass.cpp"
   DEPS
     LLVMSupport
     MLIRAffineOps
@@ -46,6 +48,7 @@ iree_cc_library(
     MLIRTransforms
     iree::compiler::Dialect::HAL::IR
     iree::compiler::Dialect::IREE::IR
+    iree::compiler::Dialect::Shape::IR
     iree::compiler::Dialect::Shape::Transforms
     iree::compiler::Translation::CodegenPasses
     iree::compiler::Translation::CodegenUtils

@@ -88,7 +88,7 @@ class NativeModule {
     interface_.alloc_state = NativeModule::ModuleAllocState;
     interface_.free_state = NativeModule::ModuleFreeState;
     interface_.resolve_import = NativeModule::ModuleResolveImport;
-    interface_.execute = NativeModule::ModuleExecute;
+    interface_.call = NativeModule::ModuleCall;
   }
 
   virtual ~NativeModule() = default;
@@ -213,20 +213,22 @@ class NativeModule {
     return IREE_STATUS_FAILED_PRECONDITION;
   }
 
-  static iree_status_t ModuleExecute(void* self, iree_vm_stack_t* stack,
-                                     iree_vm_stack_frame_t* frame,
-                                     iree_vm_execution_result_t* out_result) {
+  static iree_status_t ModuleCall(
+      void* self, iree_vm_stack_t* stack, iree_vm_function_t function,
+      const iree_vm_register_list_t* argument_registers,
+      iree_vm_execution_result_t* out_result) {
     if (!out_result) return IREE_STATUS_INVALID_ARGUMENT;
     std::memset(out_result, 0, sizeof(*out_result));
-    if (!stack || !frame) return IREE_STATUS_INVALID_ARGUMENT;
-    int32_t ordinal = frame->function.ordinal;
+    if (!stack) return IREE_STATUS_INVALID_ARGUMENT;
     auto* module = FromModulePointer(self);
-    if (ordinal < 0 || ordinal > module->dispatch_table_.size()) {
+    if (function.ordinal < 0 ||
+        function.ordinal > module->dispatch_table_.size()) {
       return IREE_STATUS_INVALID_ARGUMENT;
     }
-    const auto& info = module->dispatch_table_[ordinal];
+    const auto& info = module->dispatch_table_[function.ordinal];
     auto* state = FromStatePointer(frame->module_state);
-    auto status = info.call(info.ptr, state, stack, frame, out_result);
+    auto status = info.call(info.ptr, state, stack, function,
+                            argument_registers, out_result);
     if (!status.ok()) {
       status = iree::Annotate(
           status,

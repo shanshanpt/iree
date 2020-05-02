@@ -49,7 +49,8 @@ static iree_status_t SentinelStateResolver(
 TEST(VMStackTest, Usage) {
   auto stack = std::make_unique<iree_vm_stack_t>();
   iree_vm_state_resolver_t state_resolver = {nullptr, SentinelStateResolver};
-  IREE_EXPECT_OK(iree_vm_stack_init(state_resolver, stack.get()));
+  IREE_EXPECT_OK(
+      iree_vm_stack_init(state_resolver, IREE_ALLOCATOR_SYSTEM, stack.get()));
 
   EXPECT_EQ(nullptr, iree_vm_stack_current_frame(stack.get()));
   EXPECT_EQ(nullptr, iree_vm_stack_parent_frame(stack.get()));
@@ -86,7 +87,8 @@ TEST(VMStackTest, Usage) {
 TEST(VMStackTest, DeinitWithRemainingFrames) {
   auto stack = std::make_unique<iree_vm_stack_t>();
   iree_vm_state_resolver_t state_resolver = {nullptr, SentinelStateResolver};
-  IREE_EXPECT_OK(iree_vm_stack_init(state_resolver, stack.get()));
+  IREE_EXPECT_OK(
+      iree_vm_stack_init(state_resolver, IREE_ALLOCATOR_SYSTEM, stack.get()));
 
   iree_vm_function_t function_a = {MODULE_A_SENTINEL,
                                    IREE_VM_FUNCTION_LINKAGE_INTERNAL, 0};
@@ -106,7 +108,8 @@ TEST(VMStackTest, DeinitWithRemainingFrames) {
 TEST(VMStackTest, StackOverflow) {
   auto stack = std::make_unique<iree_vm_stack_t>();
   iree_vm_state_resolver_t state_resolver = {nullptr, SentinelStateResolver};
-  IREE_EXPECT_OK(iree_vm_stack_init(state_resolver, stack.get()));
+  IREE_EXPECT_OK(
+      iree_vm_stack_init(state_resolver, IREE_ALLOCATOR_SYSTEM, stack.get()));
 
   EXPECT_EQ(nullptr, iree_vm_stack_current_frame(stack.get()));
   EXPECT_EQ(nullptr, iree_vm_stack_parent_frame(stack.get()));
@@ -137,7 +140,8 @@ TEST(VMStackTest, StackOverflow) {
 TEST(VMStackTest, UnbalancedPop) {
   auto stack = std::make_unique<iree_vm_stack_t>();
   iree_vm_state_resolver_t state_resolver = {nullptr, SentinelStateResolver};
-  IREE_EXPECT_OK(iree_vm_stack_init(state_resolver, stack.get()));
+  IREE_EXPECT_OK(
+      iree_vm_stack_init(state_resolver, IREE_ALLOCATOR_SYSTEM, stack.get()));
 
   EXPECT_EQ(IREE_STATUS_FAILED_PRECONDITION,
             iree_vm_stack_function_leave(stack.get()));
@@ -149,7 +153,8 @@ TEST(VMStackTest, UnbalancedPop) {
 TEST(VMStackTest, ModuleStateQueries) {
   auto stack = std::make_unique<iree_vm_stack_t>();
   iree_vm_state_resolver_t state_resolver = {nullptr, SentinelStateResolver};
-  IREE_EXPECT_OK(iree_vm_stack_init(state_resolver, stack.get()));
+  IREE_EXPECT_OK(
+      iree_vm_stack_init(state_resolver, IREE_ALLOCATOR_SYSTEM, stack.get()));
 
   EXPECT_EQ(nullptr, iree_vm_stack_current_frame(stack.get()));
   EXPECT_EQ(nullptr, iree_vm_stack_parent_frame(stack.get()));
@@ -198,7 +203,8 @@ TEST(VMStackTest, ModuleStateQueryFailure) {
         // NOTE: always failing.
         return IREE_STATUS_INTERNAL;
       }};
-  IREE_EXPECT_OK(iree_vm_stack_init(state_resolver, stack.get()));
+  IREE_EXPECT_OK(
+      iree_vm_stack_init(state_resolver, IREE_ALLOCATOR_SYSTEM, stack.get()));
 
   // Push should fail if we can't query state, status should propagate.
   iree_vm_function_t function_a = {MODULE_A_SENTINEL,
@@ -234,7 +240,8 @@ iree_vm_ref_type_t DummyObject::kTypeID = IREE_VM_REF_TYPE_NULL;
 TEST(VMStackTest, RefRegisterCleanup) {
   auto stack = std::make_unique<iree_vm_stack_t>();
   iree_vm_state_resolver_t state_resolver = {nullptr, SentinelStateResolver};
-  IREE_EXPECT_OK(iree_vm_stack_init(state_resolver, stack.get()));
+  IREE_EXPECT_OK(
+      iree_vm_stack_init(state_resolver, IREE_ALLOCATOR_SYSTEM, stack.get()));
 
   dummy_object_count = 0;
   DummyObject::RegisterType();

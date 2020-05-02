@@ -314,6 +314,12 @@ struct ResultRegister {
   constexpr static auto value = std::make_tuple<uint16_t>(0);
 };
 
+template <>
+struct ResultRegister<opaque_ref> {
+  constexpr static auto value = std::make_tuple<uint16_t>(
+      IREE_REF_REGISTER_TYPE_BIT | IREE_REF_REGISTER_MOVE_BIT);
+};
+
 template <typename T>
 struct ResultRegister<ref<T>> {
   constexpr static auto value = std::make_tuple<uint16_t>(
@@ -330,6 +336,23 @@ struct ResultPack {
   static void Store(ResultPackState* result_state, T value) {
     result_state->frame->registers.i32[result_state->i32_ordinal++] =
         static_cast<int32_t>(value);
+  }
+};
+
+template <>
+struct ResultPack<opaque_ref> {
+  static void Store(ResultPackState* result_state, opaque_ref value) {
+    if (!value) {
+      result_state->status = InvalidArgumentErrorBuilder(IREE_LOC)
+                             << "Result (" << typeid(opaque_ref).name()
+                             << ") must not be null";
+      return;
+    }
+    auto* reg_ptr =
+        &result_state->frame->registers.ref[result_state->ref_ordinal++];
+    std::memset(reg_ptr, 0, sizeof(*reg_ptr));
+    // DO NOT SUBMIT get() the ref and act on that directly
+    iree_vm_ref_wrap_assign(value.release(), value.type(), reg_ptr);
   }
 };
 
@@ -401,24 +424,46 @@ struct DispatchFunctor {
   using FnPtr = StatusOr<Results> (Owner::*)(Params...);
 
   template <typename T, uint16_t... I>
-  static constexpr auto ConstTupleOr(std::integer_sequence<uint16_t, I...>) {
+  constexpr static auto ConstTupleOr(std::integer_sequence<uint16_t, I...>) {
     return std::make_tuple(
         (static_cast<uint16_t>(std::get<I>(ResultRegister<T>::value) | I))...);
   }
 
   template <typename T, size_t... I>
-  static constexpr auto TupleToArray(const T& t, std::index_sequence<I...>) {
+  constexpr static auto TupleToArray(const T& t, std::index_sequence<I...>) {
     return std::array<uint16_t, std::tuple_size<T>::value>{std::get<I>(t)...};
   }
 
+  // DO NOT SUBMIT
+  // make this take a register_list for source regs?
+  // frame becomes caller_frame
+  // pull source regs right from source, no need for local frame?
+  //
+  // return registers same way
+  // caller:
+  //  - get src_reg_list
+  //  - set caller_frame.return_registers to dst_reg_list
+  //  - issue call() with src_reg_list/dst_reg_list
+  // callee:
+  //  - bytecode: remap src_reg_list into local frame
+  //  - c++: unpack from src_reg_list
+  //  ...
+  //  - bytecode: remap on return src_reg_list to caller.return_registers
+  //  - c++: pack into caller.return_registers
+  //
+  // execute:
+  // - becomes (caller_frame, src_reg_list)?
+  // - enter/leave becomes local
+  // - leave is always safe, even when async, as caller_frame can be queried
+  //   for registers when remapping results
   static Status Call(void (Owner::*ptr)(), Owner* self, iree_vm_stack_t* stack,
-                     iree_vm_stack_frame_t* frame,
+                     iree_vm_function_t function,
+                     const iree_vm_register_list_t* argument_registers,
                      iree_vm_execution_result_t* out_result) {
     ASSIGN_OR_RETURN(auto params,
                      ParamUnpackState::LoadSequence<Params...>(frame));
 
     frame->return_registers = nullptr;
-    frame->registers.ref_register_count = 0;
 
     auto results_or =
         ApplyFn(reinterpret_cast<FnPtr>(ptr), self, std::move(params),
@@ -455,13 +500,13 @@ struct DispatchFunctorVoid {
   using FnPtr = Status (Owner::*)(Params...);
 
   static Status Call(void (Owner::*ptr)(), Owner* self, iree_vm_stack_t* stack,
-                     iree_vm_stack_frame_t* frame,
+                     iree_vm_function_t function,
+                     const iree_vm_register_list_t* argument_registers,
                      iree_vm_execution_result_t* out_result) {
     ASSIGN_OR_RETURN(auto params,
                      ParamUnpackState::LoadSequence<Params...>(frame));
 
     frame->return_registers = nullptr;
-    frame->registers.ref_register_count = 0;
 
     return ApplyFn(reinterpret_cast<FnPtr>(ptr), self, std::move(params),
                    std::make_index_sequence<sizeof...(Params)>());
@@ -481,22 +526,23 @@ struct NativeFunction {
   const char* name;
   void (Owner::*const ptr)();
   Status (*const call)(void (Owner::*ptr)(), Owner* self,
-                       iree_vm_stack_t* stack, iree_vm_stack_frame_t* frame,
+                       iree_vm_stack_t* stack, iree_vm_function_t function,
+                       const iree_vm_register_list_t* argument_registers,
                        iree_vm_execution_result_t* out_result);
 };
 
 template <typename Owner, typename Result, typename... Params>
 constexpr NativeFunction<Owner> MakeNativeFunction(
     const char* name, StatusOr<Result> (Owner::*fn)(Params...)) {
-  return {name, (void (Owner::*)())fn,
-          &packing::DispatchFunctor<Owner, Result, Params...>::Call};
+  using dispatch_functor_t = packing::DispatchFunctor<Owner, Result, Params...>;
+  return {name, (void (Owner::*)())fn, &dispatch_functor_t::Call};
 }
 
 template <typename Owner, typename... Params>
 constexpr NativeFunction<Owner> MakeNativeFunction(
     const char* name, Status (Owner::*fn)(Params...)) {
-  return {name, (void (Owner::*)())fn,
-          &packing::DispatchFunctorVoid<Owner, Params...>::Call};
+  using dispatch_functor_t = packing::DispatchFunctorVoid<Owner, Params...>;
+  return {name, (void (Owner::*)())fn, &dispatch_functor_t::Call};
 }
 
 }  // namespace vm

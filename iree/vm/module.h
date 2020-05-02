@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 
+#include "iree/base/alignment.h"
 #include "iree/base/api.h"
 #include "iree/base/atomics.h"
 
@@ -27,6 +28,25 @@ extern "C" {
 typedef struct iree_vm_module iree_vm_module_t;
 typedef struct iree_vm_stack iree_vm_stack_t;
 typedef struct iree_vm_stack_frame iree_vm_stack_frame_t;
+
+// An opaque offset into a source map that a source resolver can calculate.
+// Do not assume that iree_vm_source_offset_t+1 means the next byte offset as
+// backends are free to treat these as everything from pointers to machine code
+// to hash codes.
+typedef int64_t iree_vm_source_offset_t;
+
+// A variable-length list of registers.
+//
+// This structure is an overlay for the bytecode that is serialized in a
+// matching format, though it can be stack allocated as needed.
+typedef struct {
+  uint16_t size;
+  uint16_t registers[];
+} iree_vm_register_list_t;
+static_assert(iree_alignof(iree_vm_register_list_t) == 2,
+              "Expecting byte alignment (to avoid padding)");
+static_assert(offsetof(iree_vm_register_list_t, registers) == 2,
+              "Expect no padding in the struct");
 
 // Describes the type of a function reference.
 typedef enum {
@@ -41,6 +61,10 @@ typedef enum {
 // A function reference that can be used with the iree_vm_function_* methods.
 // These should be treated as opaque and the accessor functions should be used
 // instead.
+//
+// The register counts specify required internal storage used for VM for stack
+// frame management and debugging. They must at least be able to contain all
+// entry arguments for the function.
 typedef struct {
   // Module the function is contained within.
   iree_vm_module_t* module;
@@ -49,6 +73,10 @@ typedef struct {
   iree_vm_function_linkage_t linkage;
   // Ordinal within the module in the linkage scope.
   int32_t ordinal;
+  // Total number of valid i32 registers used by the function.
+  uint16_t i32_register_count;
+  // Total number of valid ref registers used by the function.
+  uint16_t ref_register_count;
 } iree_vm_function_t;
 
 // Describes the expected calling convention and arguments/results of a
@@ -136,12 +164,37 @@ typedef struct iree_vm_module {
       void* self, iree_vm_module_state_t* module_state, int32_t ordinal,
       iree_vm_function_t function);
 
-  // Asynchronously executes the function specified in the |frame|.
-  // This may be called repeatedly for the same frame if the execution
-  // previously yielded. The offset within the frame is preserved across calls.
-  iree_status_t(IREE_API_PTR* execute)(void* self, iree_vm_stack_t* stack,
-                                       iree_vm_stack_frame_t* frame,
-                                       iree_vm_execution_result_t* out_result);
+  // Calls |function| within the module with the given arguments.
+  // Execution may yield in the case of asynchronous code and require one or
+  // more calls to the resume method to complete.
+  //
+  // Arguments are provided by the |argument_registers| pointing into the caller
+  // stack frame. The arguments will be consumed during the initial call and are
+  // not required on resumption.
+  //
+  // Results are stored into the return_registers of the caller stack frame upon
+  // completion.
+  iree_status_t(IREE_API_PTR* call)(
+      void* self, iree_vm_stack_t* stack, iree_vm_function_t function,
+      const iree_vm_register_list_t* argument_registers,
+      iree_vm_execution_result_t* out_result);
+
+  // Calls |function| within the module with the given variadic arguments.
+  // This behaves like call but supports a variable lsit of arguments by way of
+  // the provided |segment_size_list|.
+  //
+  // The |segment_size_list| has one value per logical operand group in the call
+  // with non-variadic arguments having a value of 1 and variadic arguments
+  // having a value in the range of 0 to N.
+  iree_status_t(IREE_API_PTR* call_variadic)(
+      void* self, iree_vm_stack_t* stack, iree_vm_function_t function,
+      const iree_vm_register_list_t* argument_registers,
+      const iree_vm_register_list_t* segment_size_list,
+      iree_vm_execution_result_t* out_result);
+
+  // Resumes execution of a previously-yielded call.
+  iree_status_t(IREE_API_PTR* resume)(void* self, iree_vm_stack_t* stack,
+                                      iree_vm_execution_result_t* out_result);
 
   // Gets a reflection attribute for a function by index.
   // The returned key and value strings are guaranteed valid for the life

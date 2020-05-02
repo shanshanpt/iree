@@ -22,7 +22,8 @@
 
 // Enable to get some verbose logging; better than nothing until we have some
 // better tooling.
-#define IREE_DISPATCH_LOGGING 0
+// DO NOT SUBMIT
+#define IREE_DISPATCH_LOGGING 1
 
 #if IREE_DISPATCH_LOGGING
 #include <stdio.h>
@@ -47,71 +48,7 @@
 #define VMCHECK(expr)
 #endif  // NDEBUG
 
-// Remaps argument registers from a source list to the 0-N ABI registers.
-static void iree_vm_bytecode_dispatch_remap_argument_registers(
-    iree_vm_registers_t* src_regs, const iree_vm_register_list_t* src_reg_list,
-    iree_vm_registers_t* dst_regs) {
-  // Each bank begins left-aligned at 0 and increments per arg of its type.
-  int i32_reg_offset = 0;
-  int ref_reg_offset = 0;
-  for (int i = 0; i < src_reg_list->size; ++i) {
-    // TODO(benvanik): change encoding to avoid this branching.
-    // Could write two arrays: one for prims and one for refs.
-    uint16_t src_reg = src_reg_list->registers[i];
-    if (src_reg & IREE_REF_REGISTER_TYPE_BIT) {
-      uint16_t dst_reg = ref_reg_offset++;
-      memset(&dst_regs->ref[dst_reg & IREE_REF_REGISTER_MASK], 0,
-             sizeof(iree_vm_ref_t));
-      iree_vm_ref_retain_or_move(
-          src_reg & IREE_REF_REGISTER_MOVE_BIT,
-          &src_regs->ref[src_reg & IREE_REF_REGISTER_MASK],
-          &dst_regs->ref[dst_reg & IREE_REF_REGISTER_MASK]);
-    } else {
-      uint16_t dst_reg = i32_reg_offset++;
-      dst_regs->i32[dst_reg & IREE_I32_REGISTER_MASK] =
-          src_regs->i32[src_reg & IREE_I32_REGISTER_MASK];
-    }
-  }
-  dst_regs->ref_register_count = ref_reg_offset;
-}
-
-// Remaps registers from source to destination, possibly across frames.
-static void iree_vm_bytecode_dispatch_remap_registers(
-    iree_vm_registers_t* src_regs, const iree_vm_register_list_t* src_reg_list,
-    iree_vm_registers_t* dst_regs,
-    const iree_vm_register_list_t* dst_reg_list) {
-  VMCHECK(src_reg_list->size == dst_reg_list->size);
-  for (int i = 0; i < src_reg_list->size; ++i) {
-    // TODO(benvanik): change encoding to avoid this branching.
-    // Could write two arrays: one for prims and one for refs.
-    uint16_t src_reg = src_reg_list->registers[i];
-    uint16_t dst_reg = dst_reg_list->registers[i];
-    if (src_reg & IREE_REF_REGISTER_TYPE_BIT) {
-      iree_vm_ref_retain_or_move(
-          src_reg & IREE_REF_REGISTER_MOVE_BIT,
-          &src_regs->ref[src_reg & IREE_REF_REGISTER_MASK],
-          &dst_regs->ref[dst_reg & IREE_REF_REGISTER_MASK]);
-    } else {
-      dst_regs->i32[dst_reg & IREE_I32_REGISTER_MASK] =
-          src_regs->i32[src_reg & IREE_I32_REGISTER_MASK];
-    }
-  }
-}
-
-// Discards ref registers in the list if they are marked move.
-static void iree_vm_bytecode_dispatch_discard_registers(
-    iree_vm_registers_t* regs, const iree_vm_register_list_t* reg_list) {
-  for (int i = 0; i < reg_list->size; ++i) {
-    // TODO(benvanik): change encoding to avoid this branching.
-    uint16_t reg = reg_list->registers[i];
-    if ((reg & (IREE_REF_REGISTER_TYPE_BIT | IREE_REF_REGISTER_MOVE_BIT)) ==
-        (IREE_REF_REGISTER_TYPE_BIT | IREE_REF_REGISTER_MOVE_BIT)) {
-      iree_vm_ref_release(&regs->ref[reg & IREE_REF_REGISTER_MASK]);
-    }
-  }
-}
-
-// Interleaved src-dst register sets.
+// Interleaved src-dst register sets for branch register remapping.
 // This structure is an overlay for the bytecode that is serialized in a
 // matching format.
 typedef struct {
@@ -126,9 +63,15 @@ static_assert(iree_alignof(iree_vm_register_remap_list_t) == 2,
 static_assert(offsetof(iree_vm_register_remap_list_t, pairs) == 2,
               "Expect no padding in the struct");
 
-// Remaps registers from a source set to a destination set within the frame.
+// Remaps registers from a source set to a destination set within the same stack
+// frame. This is a way to perform a conditional multi-mov sequence instead of
+// requiring the additional bytecode representation of the conditional movs.
+//
+// This assumes that the remapping list is properly ordered such that there are
+// no swapping hazards (such as 0->1,1->0). The register allocator in the
+// compiler should ensure this is the case when it can occur.
 static void iree_vm_bytecode_dispatch_remap_branch_registers(
-    iree_vm_registers_t* regs,
+    const iree_vm_registers_t regs,
     const iree_vm_register_remap_list_t* remap_list) {
   for (int i = 0; i < remap_list->size; ++i) {
     // TODO(benvanik): change encoding to avoid this branching.
@@ -137,11 +80,25 @@ static void iree_vm_bytecode_dispatch_remap_branch_registers(
     uint16_t dst_reg = remap_list->pairs[i].dst_reg;
     if (src_reg & IREE_REF_REGISTER_TYPE_BIT) {
       iree_vm_ref_retain_or_move(src_reg & IREE_REF_REGISTER_MOVE_BIT,
-                                 &regs->ref[src_reg & IREE_REF_REGISTER_MASK],
-                                 &regs->ref[dst_reg & IREE_REF_REGISTER_MASK]);
+                                 &regs.ref[src_reg & regs.ref_mask],
+                                 &regs.ref[dst_reg & regs.ref_mask]);
     } else {
-      regs->i32[dst_reg & IREE_I32_REGISTER_MASK] =
-          regs->i32[src_reg & IREE_I32_REGISTER_MASK];
+      regs.i32[dst_reg & regs.i32_mask] = regs.i32[src_reg & regs.i32_mask];
+    }
+  }
+}
+
+// Discards ref registers in the list if they are marked move.
+// This can be used to eagerly release resources we don't need and reduces
+// memory consumption if used effectively prior to yields/waits.
+static void iree_vm_bytecode_dispatch_discard_registers(
+    const iree_vm_registers_t regs, const iree_vm_register_list_t* reg_list) {
+  for (int i = 0; i < reg_list->size; ++i) {
+    // TODO(benvanik): change encoding to avoid this branching.
+    uint16_t reg = reg_list->registers[i];
+    if ((reg & (IREE_REF_REGISTER_TYPE_BIT | IREE_REF_REGISTER_MOVE_BIT)) ==
+        (IREE_REF_REGISTER_TYPE_BIT | IREE_REF_REGISTER_MOVE_BIT)) {
+      iree_vm_ref_release(&regs.ref[reg & regs.ref_mask]);
     }
   }
 }
@@ -149,7 +106,6 @@ static void iree_vm_bytecode_dispatch_remap_branch_registers(
 iree_status_t iree_vm_bytecode_dispatch(
     iree_vm_bytecode_module_t* module,
     iree_vm_bytecode_module_state_t* module_state, iree_vm_stack_t* stack,
-    iree_vm_stack_frame_t* entry_frame,
     iree_vm_execution_result_t* out_result) {
 #if defined(IREE_DISPATCH_MODE_COMPUTED_GOTO)
 
@@ -229,8 +185,8 @@ iree_status_t iree_vm_bytecode_dispatch(
       ((uint32_t)bytecode_data[pc + 3 + i] << 24)
 #endif  // IREE_IS_LITTLE_ENDIAN
 
-#define OP_R_I32(i) regs->i32[OP_I16(i) & IREE_I32_REGISTER_MASK]
-#define OP_R_REF(i) regs->ref[OP_I16(i) & IREE_REF_REGISTER_MASK]
+#define OP_R_I32(i) regs.i32[OP_I16(i) & regs.i32_mask]
+#define OP_R_REF(i) regs.ref[OP_I16(i) & regs.ref_mask]
 #define OP_R_REF_IS_MOVE(i) (OP_I16(i) & IREE_REF_REGISTER_MOVE_BIT)
 
   // Primary dispatch state. This is our 'native stack frame' and really
@@ -240,15 +196,16 @@ iree_status_t iree_vm_bytecode_dispatch(
   // The hope is that the compiler decides to keep these in registers (as
   // they are touched for every instruction executed). The frame will change
   // as we call into different functions.
-  const iree_vm_function_descriptor_t* entry_function_descriptor =
-      &module->function_descriptor_table[entry_frame->function.ordinal];
+  iree_vm_stack_frame_t* entry_frame = iree_vm_stack_current_frame(stack);
   iree_vm_stack_frame_t* current_frame = entry_frame;
+  iree_vm_registers_t regs;
+  IREE_RETURN_IF_ERROR(
+      iree_vm_stack_frame_registers(stack, entry_frame, &regs));
   const uint8_t* bytecode_data =
-      module->bytecode_data.data + entry_function_descriptor->bytecode_offset;
+      module->bytecode_data.data +
+      module->function_descriptor_table[current_frame->function.ordinal]
+          .bytecode_offset;
   iree_vm_source_offset_t pc = current_frame->pc;
-  iree_vm_registers_t* regs = &current_frame->registers;
-  // TODO(benvanik): hide this register initialization logic in the stack enter.
-  regs->ref_register_count = entry_function_descriptor->ref_register_count;
 
   memset(out_result, 0, sizeof(*out_result));
 
@@ -511,8 +468,7 @@ iree_status_t iree_vm_bytecode_dispatch(
       pc += kRegSize + 4 + kRegSize + value_reg_list->size * kRegSize;
       int32_t new_value = default_value;
       if (index >= 0 && index < value_reg_list->size) {
-        new_value = regs->i32[value_reg_list->registers[index] &
-                              IREE_I32_REGISTER_MASK];
+        new_value = regs.i32[value_reg_list->registers[index] & regs.i32_mask];
       }
       OP_R_I32(0) = new_value;
       pc += kRegSize;
@@ -538,8 +494,7 @@ iree_status_t iree_vm_bytecode_dispatch(
           kRegSize + 4 + kRegSize + kRegSize + value_reg_list->size * kRegSize;
       iree_vm_ref_t* new_value = default_value;
       if (index >= 0 && index < value_reg_list->size) {
-        new_value = &regs->ref[value_reg_list->registers[index] &
-                               IREE_REF_REGISTER_MASK];
+        new_value = &regs.ref[value_reg_list->registers[index] & regs.ref_mask];
         is_move = value_reg_list->registers[index] & IREE_REF_REGISTER_MOVE_BIT;
       }
       iree_vm_ref_t* result_reg = &OP_R_REF(0);
@@ -775,47 +730,29 @@ iree_status_t iree_vm_bytecode_dispatch(
 
       IREE_DISPATCH_LOG_CALL(target_function);
 
-      // Remap registers from caller to callee.
-      iree_vm_stack_frame_t* callee_frame = NULL;
-      iree_status_t enter_status =
-          iree_vm_stack_function_enter(stack, target_function, &callee_frame);
-      if (!iree_status_is_ok(enter_status)) {
-        // TODO(benvanik): set execution result to stack overflow.
-        return enter_status;
-      }
-      iree_vm_bytecode_dispatch_remap_argument_registers(
-          &current_frame->registers, src_reg_list, &callee_frame->registers);
-
       if (is_import) {
         // Call external function.
-        iree_status_t call_status = target_function.module->execute(
-            target_function.module->self, stack, callee_frame, out_result);
+        iree_status_t call_status = target_function.module->call(
+            target_function.module->self, stack, target_function, src_reg_list,
+            out_result);
         if (!iree_status_is_ok(call_status)) {
           // TODO(benvanik): set execution result to failure/capture stack.
           return call_status;
         }
-        if (callee_frame->return_registers) {
-          iree_vm_bytecode_dispatch_remap_registers(
-              &callee_frame->registers, callee_frame->return_registers,
-              &current_frame->registers, current_frame->return_registers);
-        }
-        iree_vm_stack_function_leave(stack);
       } else {
         // Switch execution to the target function and continue running in the
         // bytecode dispatcher.
-        const iree_vm_function_descriptor_t* function_descriptor =
-            &module->function_descriptor_table[callee_frame->function.ordinal];
-        current_frame = callee_frame;
+        iree_status_t enter_status = iree_vm_stack_function_enter(
+            stack, target_function, src_reg_list, &current_frame, &regs);
+        if (!iree_status_is_ok(enter_status)) {
+          // TODO(benvanik): set execution result to stack overflow.
+          return enter_status;
+        }
         bytecode_data =
-            module->bytecode_data.data + function_descriptor->bytecode_offset;
-        regs = &callee_frame->registers;
-        // TODO(benvanik): hide this in the stack.
-        memset(
-            &regs->ref[regs->ref_register_count], 0,
-            sizeof(iree_vm_ref_t) * (function_descriptor->ref_register_count -
-                                     regs->ref_register_count));
-        regs->ref_register_count = function_descriptor->ref_register_count;
-        pc = callee_frame->pc;
+            module->bytecode_data.data +
+            module->function_descriptor_table[current_frame->function.ordinal]
+                .bytecode_offset;
+        pc = current_frame->pc;
       }
     });
 
@@ -861,33 +798,14 @@ iree_status_t iree_vm_bytecode_dispatch(
 
       IREE_DISPATCH_LOG_CALL(target_function);
 
-      // Remap registers from caller to callee.
-      iree_vm_stack_frame_t* callee_frame = NULL;
-      iree_status_t enter_status =
-          iree_vm_stack_function_enter(stack, target_function, &callee_frame);
-      if (!iree_status_is_ok(enter_status)) {
-        // TODO(benvanik): set execution result to stack overflow.
-        return enter_status;
-      }
-      iree_vm_bytecode_dispatch_remap_argument_registers(
-          &current_frame->registers, src_reg_list, &callee_frame->registers);
-
-      // TODO(benvanik): rename return_registers.
-      callee_frame->return_registers = seg_size_list;
-
       // Call external function.
-      iree_status_t call_status = target_function.module->execute(
-          target_function.module->self, stack, callee_frame, out_result);
+      iree_status_t call_status = target_function.module->call_variadic(
+          target_function.module->self, stack, target_function, src_reg_list,
+          seg_size_list, out_result);
       if (!iree_status_is_ok(call_status)) {
         // TODO(benvanik): set execution result to failure/capture stack.
         return call_status;
       }
-      if (callee_frame->return_registers) {
-        iree_vm_bytecode_dispatch_remap_registers(
-            &callee_frame->registers, callee_frame->return_registers,
-            &current_frame->registers, current_frame->return_registers);
-      }
-      iree_vm_stack_function_leave(stack);
     });
 
     DISPATCH_OP(Return, {
@@ -901,33 +819,21 @@ iree_status_t iree_vm_bytecode_dispatch(
           (const iree_vm_register_list_t*)&bytecode_data[pc];
       current_frame->pc = pc + kRegSize + src_reg_list->size * kRegSize;
 
+      // Leave callee by cleaning up the stack.
+      iree_vm_stack_function_leave(stack, src_reg_list, &current_frame, &regs);
+
       if (current_frame == entry_frame) {
-        // Return from the top-level entry frame - return back to execute().
+        // Return from the top-level entry frame - return back to call().
         // TODO(benvanik): clear execution results.
-        current_frame->return_registers = src_reg_list;
         return IREE_STATUS_OK;
       }
 
-      // Copy results back to the caller registers.
-      // The caller pc should be pointing at the head of the return
-      // registers list.
-      iree_vm_stack_frame_t* caller_frame = iree_vm_stack_parent_frame(stack);
-      VMCHECK(caller_frame);
-      iree_vm_bytecode_dispatch_remap_registers(
-          &current_frame->registers, src_reg_list, &caller_frame->registers,
-          caller_frame->return_registers);
-
-      // Leave callee by cleaning up the stack.
-      iree_vm_stack_function_leave(stack);
-
       // Reset dispatch state so we can continue executing in the caller.
-      current_frame = caller_frame;
       bytecode_data =
           module->bytecode_data.data +
-          module->function_descriptor_table[caller_frame->function.ordinal]
+          module->function_descriptor_table[current_frame->function.ordinal]
               .bytecode_offset;
-      regs = &caller_frame->registers;
-      pc = caller_frame->pc;
+      pc = current_frame->pc;
     });
 
     DISPATCH_OP(Fail, {

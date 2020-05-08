@@ -12,20 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("//tools/build_defs/android:rules.bzl", "android_binary", "android_instrumentation_test", "android_library")
+
 package(
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],  # Apache 2.0
 )
 
-java_test(
-    name = "ContextTest",
+android_library(
+    name = "ContextTestLib",
+    testonly = 1,
     srcs = ["ContextTest.java"],
     tags = [
         "noga",
     ],
     deps = [
         "//bindings/java/com/google/iree:Context",
-        # TODO(jennik): Update this for OSS side.
-        "//third_party/java/junit",
+        "//third_party/android/androidx_test/ext/junit",
+        "//third_party/java/junit:junit-android",
     ],
+)
+
+android_binary(
+    name = "ContextTestApp",
+    testonly = 1,
+    manifest = "TestManifest.xml",
+    tags = [
+        "noga",
+    ],
+    deps = [
+        ":ContextTestLib",
+        "//java/com/google/android/apps/common/testing/testrunner",
+    ],
+)
+
+android_instrumentation_test(
+    name = "ContextTest",
+    tags = [
+        "noga",
+    ],
+    target_device = "//tools/android/emulated_devices/generic_phone:android_29_x86",
+    test_app = "ContextTestApp",
 )

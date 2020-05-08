@@ -12,21 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load(
+    "//tools/build_defs/android:rules.bzl",
+    "android_library",
+)
+
 package(
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],  # Apache 2.0
 )
 
-# TODO(jennik): Update build rules to be android specific.
-java_library(
+# TODO(jennik): Move bindings/java to bindings/android.
+android_library(
     name = "Context",
     srcs = ["Context.java"],
-    # TODO(jennik): Update this for OSS side.
-    constraints = ["android"],
     tags = [
         "noga",
     ],
-    runtime_deps = [
+    deps = [
         "//bindings/java/com/google/iree/native:native_deps",
     ],
 )

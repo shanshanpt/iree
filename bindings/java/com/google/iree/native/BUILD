@@ -12,16 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("//mobile/build:build_defs.bzl", "android_jni_library")
+
 package(
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],  # Apache 2.0
 )
 
-cc_library(
+android_jni_library(
     name = "native_deps",
     srcs = [
         "context_jni.cc",
     ],
+    binary_name = "libiree.so",
     tags = [
         "noga",
     ],
@@ -31,13 +34,15 @@ cc_library(
         "//third_party/java/jdk:jni",
         ":context",
     ],
-    alwayslink = 1,
 )
 
 cc_library(
     name = "context",
     srcs = ["context_wrapper.cc"],
     hdrs = ["context_wrapper.h"],
+    tags = [
+        "noga",
+    ],
     deps = [
         "//iree/base:api",
         "//iree/base:logging",

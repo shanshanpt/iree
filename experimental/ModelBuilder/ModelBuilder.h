@@ -49,7 +49,7 @@
 #include "mlir/Dialect/GPU/GPUDialect.h"
 #include "mlir/Dialect/Linalg/EDSC/Builders.h"
 #include "mlir/Dialect/Linalg/EDSC/Intrinsics.h"
-#include "mlir/Dialect/LoopOps/EDSC/Builders.h"
+#include "mlir/Dialect/SCF/EDSC/Builders.h"
 #include "mlir/Dialect/StandardOps/EDSC/Intrinsics.h"
 #include "mlir/Dialect/Vector/EDSC/Intrinsics.h"
 
@@ -91,7 +91,7 @@ using edsc::intrinsics::affine_min;
 using edsc::intrinsics::AffineIndexedValue;
 // From the Loop Dialect.
 using edsc::AffineLoopNestBuilder;
-using edsc::LoopNestBuilder;
+using edsc::loopNestBuilder;
 using edsc::ParallelLoopNestBuilder;
 // -----------------------------------------------------------------------------
 

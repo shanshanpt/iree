@@ -1131,6 +1131,70 @@ struct HALInterfaceStoreTensorOpEraser final
  private:
   TensorToBufferMap const &resultTensorToBufferMap;
 };
+
+static mlir::MemRefType ConvertTensorToMemRef(mlir::TensorType type) {
+  assert(type.hasRank() && "expected only ranked shapes");
+  return MemRefType::get(type.getShape(), type.getElementType());
+}
+ 
+static mlir::Value InsertAllocAndDealloc(
+    mlir::MemRefType type, mlir::Location loc,
+    mlir::PatternRewriter &rewriter) {
+  auto alloc = rewriter.create<mlir::AllocOp>(loc, type);
+
+  // Make sure to allocate at the beginning of the block.
+  auto *parent_block = alloc.getOperation()->getBlock();
+  alloc.getOperation()->moveBefore(&parent_block->front());
+
+  // Make sure to deallocate this alloc at the end of the block. This is fine
+  // as toy functions have no control flow.
+  auto dealloc = rewriter.create<mlir::DeallocOp>(loc, alloc);
+  dealloc.getOperation()->moveBefore(&parent_block->back());
+  return alloc;
+}
+
+struct ToExtentTensorConversion final
+    : public OpConversionPattern<iree_compiler::Shape::ToExtentTensorOp> {
+  ToExtentTensorConversion(MLIRContext *context)
+      : OpConversionPattern<iree_compiler::Shape::ToExtentTensorOp>(context) {}
+
+  LogicalResult matchAndRewrite(
+      iree_compiler::Shape::ToExtentTensorOp extentOp, ArrayRef<Value> operands,
+      ConversionPatternRewriter &rewriter) const override {
+    auto loc = extentOp.getLoc();
+
+    auto inputType = operands[0].getType().dyn_cast<Shape::RankedShapeType>();
+
+    auto resultTensorType =
+        extentOp.extent_tensor().getType().cast<RankedTensorType>();
+    // TODO: static shape only now
+    if (!resultTensorType || resultTensorType.getRank() != 1 ||
+        !resultTensorType.hasStaticShape()) {
+      return failure();
+    }
+
+    auto resultMemrefType = ConvertTensorToMemRef(resultTensorType);
+
+    // TODO: AllocOp or IREE::PlaceholderOp
+    // auto phOp = rewriter.create<IREE::PlaceholderOp>(loc, resultMemrefType,
+    //                                                  "interface buffer");
+    // Value buffer = phOp.getResult();
+
+    auto buffer = InsertAllocAndDealloc(resultMemrefType, loc, rewriter);
+    auto count = resultTensorType.getShape()[0];
+    for (auto i = 0; i < count; ++i) {
+      auto ithDimValue = rewriter.create<Shape::RankedDimOp>(
+          loc, rewriter.getIntegerType(32), operands[0], i);
+      SmallVector<Value, 1> indices;
+      indices.push_back(rewriter.create<mlir::ConstantIndexOp>(loc, i));
+      rewriter.create<StoreOp>(loc, ithDimValue, buffer, indices);
+    }
+
+    rewriter.replaceOp(extentOp, buffer);
+
+    return success();
+  }
+};
 }  // namespace
 
 /// When converting all tensor-based ops to buffer-based ops, Instead of

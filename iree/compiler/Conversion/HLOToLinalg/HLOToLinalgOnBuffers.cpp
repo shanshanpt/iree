@@ -1139,12 +1139,14 @@ static mlir::MemRefType ConvertTensorToMemRef(mlir::TensorType type) {
  
 static mlir::Value InsertAllocAndDealloc(
     mlir::MemRefType type, mlir::Location loc,
-    mlir::PatternRewriter &rewriter) {
-  auto alloc = rewriter.create<mlir::AllocOp>(loc, type);
+    mlir::PatternRewriter &rewriter,
+    SmallVector<Value, 4> dynamicOperands = {}) {
+ 
+  auto alloc = rewriter.create<mlir::AllocOp>(loc, type, dynamicOperands);
 
   // Make sure to allocate at the beginning of the block.
   auto *parent_block = alloc.getOperation()->getBlock();
-  alloc.getOperation()->moveBefore(&parent_block->front());
+  //alloc.getOperation()->moveBefore(&parent_block->front());
 
   // Make sure to deallocate this alloc at the end of the block. This is fine
   // as toy functions have no control flow.
@@ -1162,8 +1164,6 @@ struct ToExtentTensorConversion final
       iree_compiler::Shape::ToExtentTensorOp extentOp, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const override {
     auto loc = extentOp.getLoc();
-
-    auto inputType = operands[0].getType().dyn_cast<Shape::RankedShapeType>();
 
     auto resultTensorType =
         extentOp.extent_tensor().getType().cast<RankedTensorType>();
@@ -1195,6 +1195,91 @@ struct ToExtentTensorConversion final
     return success();
   }
 };
+
+ArrayAttr GetNParallelLoopsAttrs(unsigned nParallelLoops, Builder b) {
+  auto parallelLoopTypeAttr = b.getStringAttr("parallel");
+  SmallVector<Attribute, 3> iteratorTypes;
+  for (int i = 0; i < nParallelLoops; ++i) {
+    iteratorTypes.push_back(parallelLoopTypeAttr);
+  }
+  return b.getArrayAttr(iteratorTypes);
+}
+
+struct RankedBroadcastInDimConversion final
+    : public OpConversionPattern<Shape::RankedBroadcastInDimOp> {
+  RankedBroadcastInDimConversion(MLIRContext *context)
+      : OpConversionPattern<Shape::RankedBroadcastInDimOp>(context) {}
+
+  LogicalResult matchAndRewrite(
+      Shape::RankedBroadcastInDimOp bcastInDimOp, ArrayRef<Value> operands,
+      ConversionPatternRewriter &rewriter) const override {
+    auto loc = bcastInDimOp.getLoc();
+
+    auto srcTensor = operands[0].getType().dyn_cast<MemRefType>();
+    auto rankedShapeType = operands[1].getType().dyn_cast<Shape::RankedShapeType>();
+    if (!srcTensor || !rankedShapeType) {
+      return failure();
+    }
+    auto resultType = bcastInDimOp.getResult().getType().cast<RankedTensorType>();
+    auto resultShape = resultType.getShape();
+    auto resultMemrefType = ConvertTensorToMemRef(resultType);
+
+    auto rank = resultShape.size();
+    unsigned nloops = rank;
+    SmallVector<AffineExpr, 4> dimExprs;
+    dimExprs.reserve(nloops);
+    SmallVector<Value, 4> inputs;
+
+    auto srcShape = srcTensor.getShape();
+    SmallVector<Value, 4> dynamicOperands;
+    for (auto shape_element : llvm::enumerate(resultShape)) {
+      if (shape_element.value() != ShapedType::kDynamicSize) continue;
+      auto ithDimValue = rewriter.create<Shape::RankedDimOp>(
+          loc, rewriter.getIndexType(), operands[1],
+          shape_element.index());
+      dynamicOperands.push_back(ithDimValue);
+    }
+    auto resultBuffer = InsertAllocAndDealloc(resultMemrefType, loc, rewriter, dynamicOperands);
+
+    if (bcastInDimOp.broadcast_dimensions()) {
+      for (const auto& broadcastDim :
+           enumerate(bcastInDimOp.broadcast_dimensions().getIntValues())) {
+        int size = broadcastDim.value().getSExtValue();
+        bool expansion_needed = srcShape[broadcastDim.index()] == 1 &&
+                                rankedShapeType.getAllDims()[size] != 1;
+        dimExprs.push_back(expansion_needed ? mlir::getAffineConstantExpr(0, bcastInDimOp.getContext())
+                                            : mlir::getAffineDimExpr(size, bcastInDimOp.getContext()));
+      }
+    }
+
+    SmallVector<Attribute, 2> indexingMaps{
+        AffineMapAttr::get(AffineMap::get(nloops, /*symbolCount=*/0, dimExprs, bcastInDimOp.getContext())),
+        AffineMapAttr::get(rewriter.getMultiDimIdentityMap(nloops))};
+
+    inputs.push_back(operands[0]);
+    inputs.push_back(resultBuffer);
+    auto linalgOp = rewriter.create<linalg::GenericOp>(
+        loc, ArrayRef<Type>{}, inputs,
+        rewriter.getI64IntegerAttr(1),  // args_in
+        rewriter.getI64IntegerAttr(1),  // args_out
+        rewriter.getArrayAttr(indexingMaps), 
+        GetNParallelLoopsAttrs(nloops, rewriter),
+        /*doc=*/nullptr, /*library_call=*/nullptr);
+
+    // Add a block to the region.
+    auto* region = &linalgOp.region();
+    auto* block = rewriter.createBlock(region, region->end());
+    block->addArguments(operands[0].getType().template cast<ShapedType>().getElementType());
+    block->addArguments(resultMemrefType.getElementType());
+
+    rewriter.setInsertionPointToEnd(block);
+    rewriter.create<linalg::YieldOp>(loc, block->getArgument(0));
+    rewriter.replaceOp(bcastInDimOp, resultBuffer);
+
+    return success();
+  }
+};
+
 }  // namespace
 
 /// When converting all tensor-based ops to buffer-based ops, Instead of
@@ -1331,6 +1416,8 @@ void ConvertHLOToLinalgOnBuffersPass::runOnFunction() {
     return signalPassFailure();
 
   OwningRewritePatternList patterns;
+  patterns.insert<ToExtentTensorConversion>(context);
+  patterns.insert<RankedBroadcastInDimConversion>(context);
   populateHLOToLinalgOnBuffersConversionPatterns(context, patterns,
                                                  resultTensorToBufferMap);
   patterns.insert<HALInterfaceLoadTensorOpEraser,
@@ -1338,6 +1425,9 @@ void ConvertHLOToLinalgOnBuffersPass::runOnFunction() {
       context, resultTensorToBufferMap);
 
   ConversionTarget target(*context);
+  target.addIllegalOp<Shape::ToExtentTensorOp>();
+  target.addIllegalOp<Shape::RankedBroadcastInDimOp>();
+
   // Make sure all XLA HLO ops are converted to Linalg ops after this pass.
   target.addIllegalDialect<xla_hlo::XlaHloDialect>();
   // All Linalg ops should operate on buffers. So hal.interface.*.tensor ops

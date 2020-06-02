@@ -25,6 +25,8 @@ namespace mlir {
 namespace iree_compiler {
 
 void addLinalgToLLVMPasses(OpPassManager &passManager) {
+  passManager.addPass(createResolveShapeOpsPass());
+
   // Linalg -> SCF
   passManager.addPass(createConvertLinalgToLoopsPass());
   passManager.addPass(createCanonicalizerPass());
